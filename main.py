@@ -9,9 +9,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# ---------------- App Config ----------------
+
 DB_PATH = Path(__file__).parent / "skillswap.db"
 
-app = FastAPI(title="Skill Swap API")
+app = FastAPI(
+    title="Skill Swap API",
+    description="Backend API for Skill Swap application",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,6 +38,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +52,7 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +62,7 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
     conn.commit()
     conn.close()
 
@@ -81,17 +90,24 @@ class MessageIn(BaseModel):
     content: str
 
 
-# ---------------- Auth helper ----------------
+# ---------------- Auth Helper ----------------
 
 def get_current_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing token")
+        raise HTTPException(status_code=401, detail="Missing token")
+
     token = authorization.split(" ", 1)[1]
+
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE token = ?", (token,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM users WHERE token = ?",
+        (token,)
+    ).fetchone()
     conn.close()
+
     if not row:
-        raise HTTPException(401, "Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
     return dict(row)
 
 
@@ -106,11 +122,10 @@ def public_user(row: dict) -> dict:
     }
 
 
-# ---------------- WebSocket connection manager ----------------
+# ---------------- WebSocket Manager ----------------
 
 class ConnectionManager:
     def __init__(self):
-        # user_id -> list of websockets (allow multiple tabs)
         self.active: Dict[int, List[WebSocket]] = {}
 
     async def connect(self, user_id: int, ws: WebSocket):
@@ -119,8 +134,10 @@ class ConnectionManager:
 
     def disconnect(self, user_id: int, ws: WebSocket):
         conns = self.active.get(user_id, [])
+
         if ws in conns:
             conns.remove(ws)
+
         if not conns and user_id in self.active:
             del self.active[user_id]
 
@@ -142,118 +159,246 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ---------------- Routes ----------------
+# ---------------- Basic Routes ----------------
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Skill Swap Backend is running",
+        "status": "live",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "message": "Server is healthy"
+    }
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return {"message": "No favicon configured"}
+
+
+# ---------------- API Routes ----------------
 
 @app.post("/api/register")
 async def register(data: RegisterIn):
     conn = get_db()
-    existing = conn.execute("SELECT id FROM users WHERE email = ?", (data.email,)).fetchone()
+
+    existing = conn.execute(
+        "SELECT id FROM users WHERE email = ?",
+        (data.email,)
+    ).fetchone()
+
     if existing:
         conn.close()
-        raise HTTPException(400, "Email already registered")
+        raise HTTPException(status_code=400, detail="Email already registered")
 
     token = secrets.token_hex(24)
+
     cur = conn.execute(
-        """INSERT INTO users (name, email, password, skill_offered, skill_wanted, bio, token, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (data.name, data.email, data.password, data.skill_offered, data.skill_wanted,
-         data.bio, token, datetime.utcnow().isoformat()),
+        """
+        INSERT INTO users 
+        (name, email, password, skill_offered, skill_wanted, bio, token, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            data.name,
+            data.email,
+            data.password,
+            data.skill_offered,
+            data.skill_wanted,
+            data.bio,
+            token,
+            datetime.utcnow().isoformat()
+        ),
     )
+
     conn.commit()
     user_id = cur.lastrowid
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+    row = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+
     conn.close()
 
     new_user = public_user(dict(row))
-    await manager.broadcast_all({"type": "user_joined", "user": new_user})
 
-    return {"token": token, "user": new_user}
+    await manager.broadcast_all({
+        "type": "user_joined",
+        "user": new_user
+    })
+
+    return {
+        "message": "Registration successful",
+        "token": token,
+        "user": new_user
+    }
 
 
 @app.post("/api/login")
 async def login(data: LoginIn):
     conn = get_db()
+
     row = conn.execute(
-        "SELECT * FROM users WHERE email = ? AND password = ?", (data.email, data.password)
+        "SELECT * FROM users WHERE email = ? AND password = ?",
+        (data.email, data.password)
     ).fetchone()
+
     if not row:
         conn.close()
-        raise HTTPException(401, "Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = secrets.token_hex(24)
-    conn.execute("UPDATE users SET token = ? WHERE id = ?", (token, row["id"]))
+
+    conn.execute(
+        "UPDATE users SET token = ? WHERE id = ?",
+        (token, row["id"])
+    )
+
     conn.commit()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+
+    row = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (row["id"],)
+    ).fetchone()
+
     conn.close()
-    return {"token": token, "user": public_user(dict(row))}
+
+    return {
+        "message": "Login successful",
+        "token": token,
+        "user": public_user(dict(row))
+    }
+
+
+@app.get("/api/me")
+async def me(current=Depends(get_current_user)):
+    return {
+        "user": public_user(current)
+    }
 
 
 @app.get("/api/users")
 async def list_users(current=Depends(get_current_user)):
     conn = get_db()
-    rows = conn.execute("SELECT * FROM users WHERE id != ? ORDER BY created_at ASC", (current["id"],)).fetchall()
+
+    rows = conn.execute(
+        "SELECT * FROM users WHERE id != ? ORDER BY created_at ASC",
+        (current["id"],)
+    ).fetchall()
+
     conn.close()
-    return [public_user(dict(r)) for r in rows]
 
-
-@app.get("/api/me")
-async def me(current=Depends(get_current_user)):
-    return public_user(current)
+    return {
+        "users": [public_user(dict(r)) for r in rows]
+    }
 
 
 @app.get("/api/messages/{other_id}")
 async def get_messages(other_id: int, current=Depends(get_current_user)):
     conn = get_db()
+
     rows = conn.execute(
-        """SELECT * FROM messages
-           WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
-           ORDER BY created_at ASC""",
-        (current["id"], other_id, other_id, current["id"]),
+        """
+        SELECT * FROM messages
+        WHERE 
+        (sender_id = ? AND receiver_id = ?) 
+        OR 
+        (sender_id = ? AND receiver_id = ?)
+        ORDER BY created_at ASC
+        """,
+        (
+            current["id"],
+            other_id,
+            other_id,
+            current["id"]
+        ),
     ).fetchall()
+
     conn.close()
-    return [dict(r) for r in rows]
+
+    return {
+        "messages": [dict(r) for r in rows]
+    }
 
 
 @app.post("/api/messages")
 async def send_message(data: MessageIn, current=Depends(get_current_user)):
     conn = get_db()
+
     now = datetime.utcnow().isoformat()
+
     cur = conn.execute(
-        "INSERT INTO messages (sender_id, receiver_id, content, created_at) VALUES (?, ?, ?, ?)",
-        (current["id"], data.receiver_id, data.content, now),
+        """
+        INSERT INTO messages 
+        (sender_id, receiver_id, content, created_at) 
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            current["id"],
+            data.receiver_id,
+            data.content,
+            now
+        ),
     )
+
     conn.commit()
     msg_id = cur.lastrowid
     conn.close()
 
+    message = {
+        "id": msg_id,
+        "sender_id": current["id"],
+        "receiver_id": data.receiver_id,
+        "content": data.content,
+        "created_at": now,
+    }
+
     payload = {
         "type": "message",
-        "message": {
-            "id": msg_id,
-            "sender_id": current["id"],
-            "receiver_id": data.receiver_id,
-            "content": data.content,
-            "created_at": now,
-        },
+        "message": message,
     }
+
     await manager.send_to_user(data.receiver_id, payload)
     await manager.send_to_user(current["id"], payload)
-    return payload["message"]
 
+    return {
+        "message": message
+    }
+
+
+# ---------------- WebSocket Route ----------------
 
 @app.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE token = ?", (token,)).fetchone()
+
+    row = conn.execute(
+        "SELECT * FROM users WHERE token = ?",
+        (token,)
+    ).fetchone()
+
     conn.close()
+
     if not row:
         await websocket.close(code=4001)
         return
 
     user_id = row["id"]
+
     await manager.connect(user_id, websocket)
+
     try:
         while True:
-            await websocket.receive_text()  # keep-alive ping, ignore content
+            await websocket.receive_text()
+
     except WebSocketDisconnect:
         manager.disconnect(user_id, websocket)
